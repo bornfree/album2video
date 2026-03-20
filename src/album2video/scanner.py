@@ -39,7 +39,7 @@ def discover_albums(root: Path) -> list[Album]:
 def scan_album(folder: Path) -> Album:
     album = Album(name=folder.name, path=folder)
     for f in folder.iterdir():
-        if f.name.startswith(".") or f.name == "__video.mp4":
+        if f.name.startswith(".") or f.name in ("__video.mp4", "__video.manifest.json"):
             continue
         ext = f.suffix.lower()
         if ext in IMAGE_EXTS:

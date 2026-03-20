@@ -23,8 +23,9 @@ def sort_media(files: list[Path], cfg: Config) -> list[Path]:
     # stable sort: files with dates first (sorted by date), then files without dates (sorted by name)
     with_date = [(d, p) for d, p in dated if d is not None]
     without_date = [p for d, p in dated if d is None]
-    # Normalize all datetimes to UTC for comparison
-    with_date.sort(key=lambda x: x[0].replace(tzinfo=None) if x[0].tzinfo else x[0])
+    # Normalize: convert aware datetimes (UTC from ffprobe) to local time,
+    # then compare as naive — EXIF dates are already naive local time
+    with_date.sort(key=lambda x: x[0].astimezone().replace(tzinfo=None) if x[0].tzinfo else x[0])
     without_date.sort(key=_natural_key)
     return [p for _, p in with_date] + without_date
 
@@ -45,6 +46,8 @@ def _exif_date(path: Path) -> datetime | None:
     try:
         from PIL import Image
         from PIL.ExifTags import Base as ExifBase
+        import pillow_heif
+        pillow_heif.register_heif_opener()
         with Image.open(path) as img:
             exif = img.getexif()
             raw = exif.get(ExifBase.DateTimeOriginal) or exif.get(ExifBase.DateTime)

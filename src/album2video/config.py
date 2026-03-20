@@ -28,6 +28,7 @@ class Config:
     photo_duration: int = 10
     audio_crossfade: int = 3
     ken_burns: bool = True
+    cleanup_sources: bool = False
 
     @property
     def resolution(self) -> str:
@@ -52,4 +53,5 @@ def load_config() -> Config:
         photo_duration=int(os.getenv("PHOTO_DURATION", "10")),
         audio_crossfade=int(os.getenv("AUDIO_CROSSFADE", "3")),
         ken_burns=os.getenv("KEN_BURNS", "true").lower() in ("true", "1", "yes"),
+        cleanup_sources=os.getenv("CLEANUP_SOURCES", "false").lower() in ("true", "1", "yes"),
     )
