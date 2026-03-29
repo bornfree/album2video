@@ -19,14 +19,8 @@ _NEEDS_CONVERSION = frozenset({
 # Provides headroom for zoom/pan without showing canvas edges.
 _CANVAS_SCALE = 2
 
-# Portrait images fill this fraction of the output width
-_IMAGE_FILL = 0.8
-
 # Landscape zoom range (15%)
 _ZOOM_AMOUNT = 0.15
-
-# Portrait zoom range (25%, so zoom-out starts at >120%)
-_ZOOM_AMOUNT_PORTRAIT = 0.25
 
 # Pan drift: fraction of available margin for panning
 _PAN_DRIFT = 0.3
@@ -100,15 +94,8 @@ def _build_canvas(input_path: Path, cfg: Config,
     canvas_w = ow * _CANVAS_SCALE
     canvas_h = oh * _CANVAS_SCALE
 
-    fill = 1.0 if not is_portrait else _IMAGE_FILL
-    fit_w = int(ow * fill)
+    fit_w = ow
     fit_h = int(h * fit_w / w)
-
-    if is_portrait:
-        max_h = int(oh * 0.9)
-        if fit_h > max_h:
-            fit_h = max_h
-            fit_w = int(w * fit_h / h)
 
     with Image.open(input_path) as img:
         resized = img.resize((fit_w, fit_h), Image.LANCZOS)
@@ -237,18 +224,40 @@ def _l_zoom_out_pan_up(cw, ch, ow, oh, cx, cy):
     return start, end
 
 
-# --- Portrait presets: zoom only, no pan ---
+# --- Portrait presets: sliding 16:9 viewport over full-width portrait ---
+# Image is scaled to fill output width, so it's taller than the output.
+# Viewport pans vertically from center toward top or bottom edge.
 
-def _p_zoom_in(cw, ch, ow, oh, cx, cy):
-    z = 1 + _ZOOM_AMOUNT_PORTRAIT
+def _p_center_to_top_zoom_in(cw, ch, ow, oh, cx, cy):
+    margin_y = (ch - oh) / 2
+    travel = margin_y * _PAN_DRIFT
+    z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow, oh)
-    end = _make_box(cx, cy, ow / z, oh / z)
+    end = _make_box(cx, cy - travel, ow / z, oh / z)
     return start, end
 
-def _p_zoom_out(cw, ch, ow, oh, cx, cy):
-    z = 1 + _ZOOM_AMOUNT_PORTRAIT
+def _p_center_to_bottom_zoom_in(cw, ch, ow, oh, cx, cy):
+    margin_y = (ch - oh) / 2
+    travel = margin_y * _PAN_DRIFT
+    z = 1 + _ZOOM_AMOUNT
+    start = _make_box(cx, cy, ow, oh)
+    end = _make_box(cx, cy + travel, ow / z, oh / z)
+    return start, end
+
+def _p_center_to_top_zoom_out(cw, ch, ow, oh, cx, cy):
+    margin_y = (ch - oh) / 2
+    travel = margin_y * _PAN_DRIFT
+    z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow / z, oh / z)
-    end = _make_box(cx, cy, ow, oh)
+    end = _make_box(cx, cy - travel, ow, oh)
+    return start, end
+
+def _p_center_to_bottom_zoom_out(cw, ch, ow, oh, cx, cy):
+    margin_y = (ch - oh) / 2
+    travel = margin_y * _PAN_DRIFT
+    z = 1 + _ZOOM_AMOUNT
+    start = _make_box(cx, cy, ow / z, oh / z)
+    end = _make_box(cx, cy + travel, ow, oh)
     return start, end
 
 
@@ -262,8 +271,10 @@ _PRESETS_LANDSCAPE = [
 ]
 
 _PRESETS_PORTRAIT = [
-    _p_zoom_in,
-    _p_zoom_out,
+    _p_center_to_top_zoom_in,
+    _p_center_to_bottom_zoom_in,
+    _p_center_to_top_zoom_out,
+    _p_center_to_bottom_zoom_out,
 ]
 
 
