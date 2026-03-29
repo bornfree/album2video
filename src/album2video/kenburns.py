@@ -104,7 +104,7 @@ def _build_canvas(input_path: Path, cfg: Config,
     paste_x = (canvas_w - fit_w) // 2
     paste_y = (canvas_h - fit_h) // 2
     canvas.paste(resized, (paste_x, paste_y))
-    return canvas
+    return canvas, fit_w, fit_h
 
 
 def _make_box(cx: float, cy: float,
@@ -124,12 +124,12 @@ def _ken_burns_clip(input_path: Path, output_path: Path, cfg: Config,
     ow, oh = cfg.output_width, cfg.output_height
     total_frames = cfg.photo_duration * cfg.output_fps
 
-    canvas = _build_canvas(input_path, cfg, w, h, is_portrait)
+    canvas, fit_w, fit_h = _build_canvas(input_path, cfg, w, h, is_portrait)
     canvas_w, canvas_h = canvas.size
     cx, cy = canvas_w / 2.0, canvas_h / 2.0
 
     preset = random.choice(_PRESETS_PORTRAIT if is_portrait else _PRESETS_LANDSCAPE)
-    start_box, end_box = preset(canvas_w, canvas_h, ow, oh, cx, cy)
+    start_box, end_box = preset(canvas_w, canvas_h, ow, oh, cx, cy, fit_w, fit_h)
 
     cmd = [
         "ffmpeg", "-hide_banner", "-y",
@@ -180,47 +180,40 @@ def _ken_burns_clip(input_path: Path, output_path: Path, cfg: Config,
 #   z = 1.0 → crop equals output size (normal view of canvas)
 #   z = 1.15 → 15% zoom in (crop is smaller, resized up to output)
 
-# --- Landscape presets ---
+# --- Landscape presets: sliding 16:9 viewport over full-width landscape ---
+# Image is scaled to fill output width, so it's taller than the output
+# (for standard 4:3 / 3:2 photos). Viewport pans vertically within the image.
 
-def _l_zoom_in_pan_right(cw, ch, ow, oh, cx, cy):
+def _l_center_to_top_zoom_in(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    margin_y = (fit_h - oh) / 2
+    travel = margin_y * _PAN_DRIFT
+    z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow, oh)
-    end_cw, end_ch = ow / (1 + _ZOOM_AMOUNT), oh / (1 + _ZOOM_AMOUNT)
-    margin_x = (cw - end_cw) / 2
-    end = _make_box(cx + margin_x * _PAN_DRIFT, cy, end_cw, end_ch)
+    end = _make_box(cx, cy - travel, ow / z, oh / z)
     return start, end
 
-def _l_zoom_in_pan_left(cw, ch, ow, oh, cx, cy):
+def _l_center_to_bottom_zoom_in(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    margin_y = (fit_h - oh) / 2
+    travel = margin_y * _PAN_DRIFT
+    z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow, oh)
-    end_cw, end_ch = ow / (1 + _ZOOM_AMOUNT), oh / (1 + _ZOOM_AMOUNT)
-    margin_x = (cw - end_cw) / 2
-    end = _make_box(cx - margin_x * _PAN_DRIFT, cy, end_cw, end_ch)
+    end = _make_box(cx, cy + travel, ow / z, oh / z)
     return start, end
 
-def _l_zoom_out_center(cw, ch, ow, oh, cx, cy):
+def _l_center_to_top_zoom_out(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    margin_y = (fit_h - oh) / 2
+    travel = margin_y * _PAN_DRIFT
     z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow / z, oh / z)
-    end = _make_box(cx, cy, ow, oh)
+    end = _make_box(cx, cy - travel, ow, oh)
     return start, end
 
-def _l_zoom_in_center(cw, ch, ow, oh, cx, cy):
+def _l_center_to_bottom_zoom_out(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    margin_y = (fit_h - oh) / 2
+    travel = margin_y * _PAN_DRIFT
     z = 1 + _ZOOM_AMOUNT
-    start = _make_box(cx, cy, ow, oh)
-    end = _make_box(cx, cy, ow / z, oh / z)
-    return start, end
-
-def _l_zoom_in_pan_down(cw, ch, ow, oh, cx, cy):
-    start = _make_box(cx, cy, ow, oh)
-    end_cw, end_ch = ow / (1 + _ZOOM_AMOUNT), oh / (1 + _ZOOM_AMOUNT)
-    margin_y = (ch - end_ch) / 2
-    end = _make_box(cx, cy + margin_y * _PAN_DRIFT, end_cw, end_ch)
-    return start, end
-
-def _l_zoom_out_pan_up(cw, ch, ow, oh, cx, cy):
-    z = 1 + _ZOOM_AMOUNT
-    start_cw, start_ch = ow / z, oh / z
-    margin_y = (ch - start_cw) / 2
-    start = _make_box(cx, cy + margin_y * _PAN_DRIFT * 0.5, start_cw, start_ch)
-    end = _make_box(cx, cy - margin_y * _PAN_DRIFT * 0.5, ow, oh)
+    start = _make_box(cx, cy, ow / z, oh / z)
+    end = _make_box(cx, cy + travel, ow, oh)
     return start, end
 
 
@@ -228,32 +221,32 @@ def _l_zoom_out_pan_up(cw, ch, ow, oh, cx, cy):
 # Image is scaled to fill output width, so it's taller than the output.
 # Viewport pans vertically from center toward top or bottom edge.
 
-def _p_center_to_top_zoom_in(cw, ch, ow, oh, cx, cy):
-    margin_y = (ch - oh) / 2
+def _p_center_to_top_zoom_in(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    margin_y = (fit_h - oh) / 2
     travel = margin_y * _PAN_DRIFT
     z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow, oh)
     end = _make_box(cx, cy - travel, ow / z, oh / z)
     return start, end
 
-def _p_center_to_bottom_zoom_in(cw, ch, ow, oh, cx, cy):
-    margin_y = (ch - oh) / 2
+def _p_center_to_bottom_zoom_in(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    margin_y = (fit_h - oh) / 2
     travel = margin_y * _PAN_DRIFT
     z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow, oh)
     end = _make_box(cx, cy + travel, ow / z, oh / z)
     return start, end
 
-def _p_center_to_top_zoom_out(cw, ch, ow, oh, cx, cy):
-    margin_y = (ch - oh) / 2
+def _p_center_to_top_zoom_out(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    margin_y = (fit_h - oh) / 2
     travel = margin_y * _PAN_DRIFT
     z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow / z, oh / z)
     end = _make_box(cx, cy - travel, ow, oh)
     return start, end
 
-def _p_center_to_bottom_zoom_out(cw, ch, ow, oh, cx, cy):
-    margin_y = (ch - oh) / 2
+def _p_center_to_bottom_zoom_out(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    margin_y = (fit_h - oh) / 2
     travel = margin_y * _PAN_DRIFT
     z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow / z, oh / z)
@@ -262,12 +255,10 @@ def _p_center_to_bottom_zoom_out(cw, ch, ow, oh, cx, cy):
 
 
 _PRESETS_LANDSCAPE = [
-    _l_zoom_in_pan_right,
-    _l_zoom_in_pan_left,
-    _l_zoom_out_center,
-    _l_zoom_in_center,
-    _l_zoom_in_pan_down,
-    _l_zoom_out_pan_up,
+    _l_center_to_top_zoom_in,
+    _l_center_to_bottom_zoom_in,
+    _l_center_to_top_zoom_out,
+    _l_center_to_bottom_zoom_out,
 ]
 
 _PRESETS_PORTRAIT = [
