@@ -63,8 +63,8 @@ def _exif_date(path: Path) -> datetime | None:
                 tz = _parse_offset(offset_str)
                 if tz is not None:
                     return dt.replace(tzinfo=tz).astimezone(timezone.utc)
-            # No offset available — return as naive (sorted among other naive times)
-            return dt
+            # No offset available — assume UTC for consistent sorting
+            return dt.replace(tzinfo=timezone.utc)
     except Exception:
         pass
     return None

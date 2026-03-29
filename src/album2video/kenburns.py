@@ -6,7 +6,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from album2video.config import Config
 
@@ -24,6 +24,12 @@ _ZOOM_AMOUNT = 0.15
 
 # Pan drift: fraction of available margin for panning
 _PAN_DRIFT = 0.3
+
+# Portrait blurred background: Gaussian blur radius (pixels at canvas scale)
+_BLUR_RADIUS = 120
+
+# Portrait pan drift: fraction of output width for gentle diagonal movement
+_PAN_DRIFT_PORTRAIT = 0.04
 
 
 def image_to_clip(image_path: Path, output_path: Path, cfg: Config,
@@ -44,27 +50,30 @@ def image_to_clip(image_path: Path, output_path: Path, cfg: Config,
 
 def _static_clip(input_path: Path, output_path: Path, cfg: Config,
                  w: int, h: int, is_portrait: bool, name: str) -> None:
-    """Static image clip: portrait fits height, landscape fits width."""
+    """Static image clip: portrait gets blurred bg, landscape fits width."""
     from album2video import ffmpeg
     ow, oh = cfg.output_width, cfg.output_height
 
     if is_portrait:
-        fit_h = oh
-        fit_w = int(w * fit_h / h)
+        # Generate blurred-background composite with Pillow
+        composite_path = input_path.parent / f"{input_path.stem}_composite.jpg"
+        _portrait_composite(input_path, ow, oh, w, h, composite_path)
+        vf = f"scale={ow}:{oh},format=yuv420p"
+        encode_input = composite_path
     else:
         fit_w = ow
         fit_h = int(h * fit_w / w)
+        fit_w += fit_w % 2
+        fit_h += fit_h % 2
+        vf = (
+            f"scale={fit_w}:{fit_h},"
+            f"pad={ow}:{oh}:({ow}-iw)/2:({oh}-ih)/2:black,"
+            f"format=yuv420p"
+        )
+        encode_input = input_path
 
-    fit_w += fit_w % 2
-    fit_h += fit_h % 2
-
-    vf = (
-        f"scale={fit_w}:{fit_h},"
-        f"pad={ow}:{oh}:({ow}-iw)/2:({oh}-ih)/2:black,"
-        f"format=yuv420p"
-    )
     ffmpeg.run([
-        "-loop", "1", "-i", str(input_path),
+        "-loop", "1", "-i", str(encode_input),
         "-vf", vf,
         "-t", str(cfg.photo_duration),
         "-r", str(cfg.output_fps),
@@ -76,6 +85,34 @@ def _static_clip(input_path: Path, output_path: Path, cfg: Config,
         "-an",
         str(output_path),
     ], desc=f"Static: {name}")
+
+    if is_portrait:
+        composite_path.unlink(missing_ok=True)
+
+
+def _portrait_composite(input_path: Path, ow: int, oh: int,
+                        w: int, h: int, out_path: Path) -> None:
+    """Create an output-sized JPEG with blurred bg + sharp portrait centered."""
+    with Image.open(input_path) as img:
+        # Blurred background: scale to fill output, center-crop
+        bg_scale = max(ow / w, oh / h)
+        bg_w, bg_h = int(w * bg_scale), int(h * bg_scale)
+        bg = img.resize((bg_w, bg_h), Image.LANCZOS)
+        left = (bg_w - ow) // 2
+        top = (bg_h - oh) // 2
+        composite = bg.crop((left, top, left + ow, top + oh))
+        composite = composite.filter(
+            ImageFilter.GaussianBlur(radius=_BLUR_RADIUS // _CANVAS_SCALE))
+
+        # Sharp foreground: fit to height
+        fit_h = oh
+        fit_w = int(w * fit_h / h)
+        fit_w += fit_w % 2
+        sharp = img.resize((fit_w, fit_h), Image.LANCZOS)
+
+        paste_x = (ow - fit_w) // 2
+        composite.paste(sharp, (paste_x, 0))
+        composite.save(str(out_path), "JPEG", quality=95)
 
 
 # ---------------------------------------------------------------------------
@@ -89,16 +126,41 @@ def _static_clip(input_path: Path, output_path: Path, cfg: Config,
 
 def _build_canvas(input_path: Path, cfg: Config,
                   w: int, h: int, is_portrait: bool) -> Image.Image:
-    """Compose image centered on a black canvas with zoom/pan headroom."""
+    """Compose image centered on a canvas with zoom/pan headroom.
+
+    Portrait images get a blurred background fill (fit-to-height sharp
+    foreground) so the full portrait is visible without black bars.
+    Landscape images use a black canvas (fit-to-width).
+    """
     ow, oh = cfg.output_width, cfg.output_height
     canvas_w = ow * _CANVAS_SCALE
     canvas_h = oh * _CANVAS_SCALE
 
-    fit_w = ow
-    fit_h = int(h * fit_w / w)
-
     with Image.open(input_path) as img:
-        resized = img.resize((fit_w, fit_h), Image.LANCZOS)
+        if is_portrait:
+            # Blurred background: scale to fill canvas, center-crop
+            bg_scale = max(canvas_w / w, canvas_h / h)
+            bg_w, bg_h = int(w * bg_scale), int(h * bg_scale)
+            bg = img.resize((bg_w, bg_h), Image.LANCZOS)
+            left = (bg_w - canvas_w) // 2
+            top = (bg_h - canvas_h) // 2
+            canvas = bg.crop((left, top, left + canvas_w, top + canvas_h))
+            canvas = canvas.filter(ImageFilter.GaussianBlur(radius=_BLUR_RADIUS))
+
+            # Sharp foreground: fit to output height
+            fit_h = oh
+            fit_w = int(w * fit_h / h)
+            fit_w += fit_w % 2
+            resized = img.resize((fit_w, fit_h), Image.LANCZOS)
+
+            paste_x = (canvas_w - fit_w) // 2
+            paste_y = (canvas_h - fit_h) // 2
+            canvas.paste(resized, (paste_x, paste_y))
+            return canvas, fit_w, fit_h
+        else:
+            fit_w = ow
+            fit_h = int(h * fit_w / w)
+            resized = img.resize((fit_w, fit_h), Image.LANCZOS)
 
     canvas = Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0))
     paste_x = (canvas_w - fit_w) // 2
@@ -217,40 +279,41 @@ def _l_center_to_bottom_zoom_out(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
     return start, end
 
 
-# --- Portrait presets: sliding 16:9 viewport over full-width portrait ---
-# Image is scaled to fill output width, so it's taller than the output.
-# Viewport pans vertically from center toward top or bottom edge.
+# --- Portrait presets: gentle zoom + diagonal drift ---
+# Image is fit to height with blurred background filling the sides.
+# Full portrait is visible, so we use subtle diagonal movement
+# rather than the sweeping vertical pan used for landscape.
 
-def _p_center_to_top_zoom_in(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
-    margin_y = (fit_h - oh) / 2
-    travel = margin_y * _PAN_DRIFT
+def _p_zoom_in_drift_ul(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    dx = ow * _PAN_DRIFT_PORTRAIT
+    dy = oh * _PAN_DRIFT_PORTRAIT
     z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow, oh)
-    end = _make_box(cx, cy - travel, ow / z, oh / z)
+    end = _make_box(cx - dx, cy - dy, ow / z, oh / z)
     return start, end
 
-def _p_center_to_bottom_zoom_in(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
-    margin_y = (fit_h - oh) / 2
-    travel = margin_y * _PAN_DRIFT
+def _p_zoom_in_drift_lr(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    dx = ow * _PAN_DRIFT_PORTRAIT
+    dy = oh * _PAN_DRIFT_PORTRAIT
     z = 1 + _ZOOM_AMOUNT
     start = _make_box(cx, cy, ow, oh)
-    end = _make_box(cx, cy + travel, ow / z, oh / z)
+    end = _make_box(cx + dx, cy + dy, ow / z, oh / z)
     return start, end
 
-def _p_center_to_top_zoom_out(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
-    margin_y = (fit_h - oh) / 2
-    travel = margin_y * _PAN_DRIFT
+def _p_zoom_out_drift_ur(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    dx = ow * _PAN_DRIFT_PORTRAIT
+    dy = oh * _PAN_DRIFT_PORTRAIT
     z = 1 + _ZOOM_AMOUNT
-    start = _make_box(cx, cy, ow / z, oh / z)
-    end = _make_box(cx, cy - travel, ow, oh)
+    start = _make_box(cx + dx, cy - dy, ow / z, oh / z)
+    end = _make_box(cx, cy, ow, oh)
     return start, end
 
-def _p_center_to_bottom_zoom_out(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
-    margin_y = (fit_h - oh) / 2
-    travel = margin_y * _PAN_DRIFT
+def _p_zoom_out_drift_ll(cw, ch, ow, oh, cx, cy, fit_w, fit_h):
+    dx = ow * _PAN_DRIFT_PORTRAIT
+    dy = oh * _PAN_DRIFT_PORTRAIT
     z = 1 + _ZOOM_AMOUNT
-    start = _make_box(cx, cy, ow / z, oh / z)
-    end = _make_box(cx, cy + travel, ow, oh)
+    start = _make_box(cx - dx, cy + dy, ow / z, oh / z)
+    end = _make_box(cx, cy, ow, oh)
     return start, end
 
 
@@ -262,10 +325,10 @@ _PRESETS_LANDSCAPE = [
 ]
 
 _PRESETS_PORTRAIT = [
-    _p_center_to_top_zoom_in,
-    _p_center_to_bottom_zoom_in,
-    _p_center_to_top_zoom_out,
-    _p_center_to_bottom_zoom_out,
+    _p_zoom_in_drift_ul,
+    _p_zoom_in_drift_lr,
+    _p_zoom_out_drift_ur,
+    _p_zoom_out_drift_ll,
 ]
 
 
